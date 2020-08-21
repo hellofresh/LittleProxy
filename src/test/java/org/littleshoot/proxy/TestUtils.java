@@ -13,6 +13,7 @@ import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.conn.BasicHttpClientConnectionManager;
 import org.eclipse.jetty.server.*;
 import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.littleshoot.proxy.extras.SelfSignedSslEngineSource;
 
 import javax.net.ssl.SSLContext;
@@ -101,7 +102,8 @@ public class TestUtils {
         });
         if (enableHttps) {
             // Add SSL connector
-            org.eclipse.jetty.util.ssl.SslContextFactory sslContextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory();
+            SslContextFactory sslContextFactory = new SslContextFactory();
+            sslContextFactory.setExcludeProtocols("TLSv1.3");
 
             SelfSignedSslEngineSource contextSource = new SelfSignedSslEngineSource();
             SSLContext sslContext = contextSource.getSslContext();
@@ -173,7 +175,8 @@ public class TestUtils {
         });
         if (enableHttps) {
             // Add SSL connector
-            org.eclipse.jetty.util.ssl.SslContextFactory sslContextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory();
+            SslContextFactory sslContextFactory = new SslContextFactory();
+            sslContextFactory.setExcludeProtocols("TLSv1.3");
 
             SelfSignedSslEngineSource contextSource = new SelfSignedSslEngineSource();
             SSLContext sslContext = contextSource.getSslContext();

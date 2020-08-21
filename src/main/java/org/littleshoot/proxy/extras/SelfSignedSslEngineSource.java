@@ -33,7 +33,7 @@ public class SelfSignedSslEngineSource implements SslEngineSource {
 
     private static final String ALIAS = "littleproxy";
     private static final String PASSWORD = "Be Your Own Lantern";
-    private static final String PROTOCOL = "TLS";
+    private static final String PROTOCOL = "TLSv1.2";
     private final File keyStoreFile;
     private final boolean trustAllServers;
     private final boolean sendCerts;
