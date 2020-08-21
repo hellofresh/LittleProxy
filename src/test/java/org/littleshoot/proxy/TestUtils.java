@@ -9,6 +9,8 @@ import org.apache.http.conn.ssl.SSLSocketFactory;
 import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
 import org.apache.http.conn.ssl.X509HostnameVerifier;
 import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.conn.BasicHttpClientConnectionManager;
 import org.eclipse.jetty.server.*;
 import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.littleshoot.proxy.extras.SelfSignedSslEngineSource;
@@ -30,8 +32,6 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
-import java.time.Duration;
-import java.util.concurrent.Callable;
 
 public class TestUtils {
 
@@ -374,29 +374,9 @@ public class TestUtils {
      *
      * @return instance of DefaultHttpClient
      */
-    public static DefaultHttpClient buildHttpClient() throws Exception {
-        DefaultHttpClient httpClient = new DefaultHttpClient();
-        SSLSocketFactory sf = new SSLSocketFactory(
-                new TrustSelfSignedStrategy(), new X509HostnameVerifier() {
-            public boolean verify(String arg0, SSLSession arg1) {
-                return true;
-            }
-
-            public void verify(String host, String[] cns,
-                               String[] subjectAlts)
-                    throws SSLException {
-            }
-
-            public void verify(String host, X509Certificate cert)
-                    throws SSLException {
-            }
-
-            public void verify(String host, SSLSocket ssl)
-                    throws IOException {
-            }
-        });
-        Scheme scheme = new Scheme("https", 443, sf);
-        httpClient.getConnectionManager().getSchemeRegistry().register(scheme);
+    public static HttpClientBuilder buildHttpClient() {
+        HttpClientBuilder httpClient = HttpClientBuilder.create();
+        httpClient.setConnectionManager(new BasicHttpClientConnectionManager());
         return httpClient;
     }
 }
