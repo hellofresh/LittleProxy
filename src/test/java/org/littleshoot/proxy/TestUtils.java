@@ -5,13 +5,21 @@ import org.apache.http.HttpHost;
 import org.apache.http.client.HttpClient;
 import org.apache.http.conn.params.ConnRoutePNames;
 import org.apache.http.conn.scheme.Scheme;
-import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLSocketFactory;
+import org.apache.http.conn.ssl.TrustAllStrategy;
 import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
 import org.apache.http.conn.ssl.X509HostnameVerifier;
 import org.apache.http.impl.client.DefaultHttpClient;
-import org.eclipse.jetty.server.*;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.ssl.SSLContextBuilder;
+import org.eclipse.jetty.server.Connector;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.server.SslConnectionFactory;
 import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.littleshoot.proxy.extras.SelfSignedSslEngineSource;
 
 import javax.net.ssl.SSLContext;
@@ -29,6 +37,9 @@ import java.lang.management.MemoryUsage;
 import java.lang.management.OperatingSystemMXBean;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 
@@ -100,7 +111,8 @@ public class TestUtils {
         });
         if (enableHttps) {
             // Add SSL connector
-            org.eclipse.jetty.util.ssl.SslContextFactory sslContextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory();
+            SslContextFactory sslContextFactory = new SslContextFactory();
+            sslContextFactory.setExcludeProtocols("TLSv1.3");
 
             SelfSignedSslEngineSource contextSource = new SelfSignedSslEngineSource();
             SSLContext sslContext = contextSource.getSslContext();
@@ -172,7 +184,8 @@ public class TestUtils {
         });
         if (enableHttps) {
             // Add SSL connector
-            org.eclipse.jetty.util.ssl.SslContextFactory sslContextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory();
+            SslContextFactory sslContextFactory = new SslContextFactory();
+            sslContextFactory.setExcludeProtocols("TLSv1.3");
 
             SelfSignedSslEngineSource contextSource = new SelfSignedSslEngineSource();
             SSLContext sslContext = contextSource.getSslContext();
@@ -373,29 +386,15 @@ public class TestUtils {
      *
      * @return instance of DefaultHttpClient
      */
-    public static DefaultHttpClient buildHttpClient() throws Exception {
-        DefaultHttpClient httpClient = new DefaultHttpClient();
-        SSLSocketFactory sf = new SSLSocketFactory(
-                new TrustSelfSignedStrategy(), new X509HostnameVerifier() {
-            public boolean verify(String arg0, SSLSession arg1) {
-                return true;
-            }
+    public static HttpClientBuilder buildHttpClient() {
 
-            public void verify(String host, String[] cns,
-                               String[] subjectAlts)
-                    throws SSLException {
-            }
-
-            public void verify(String host, X509Certificate cert)
-                    throws SSLException {
-            }
-
-            public void verify(String host, SSLSocket ssl)
-                    throws IOException {
-            }
-        });
-        Scheme scheme = new Scheme("https", 443, sf);
-        httpClient.getConnectionManager().getSchemeRegistry().register(scheme);
+        HttpClientBuilder httpClient = null;
+        try {
+            httpClient = HttpClientBuilder.create().setSSLContext(new SSLContextBuilder().loadTrustMaterial(null, TrustAllStrategy.INSTANCE).build())
+                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
+        } catch (NoSuchAlgorithmException | KeyManagementException | KeyStoreException e) {
+            e.printStackTrace();
+        }
         return httpClient;
     }
 }

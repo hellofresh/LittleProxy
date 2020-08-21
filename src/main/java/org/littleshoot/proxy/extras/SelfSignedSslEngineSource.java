@@ -33,7 +33,7 @@ public class SelfSignedSslEngineSource implements SslEngineSource {
 
     private static final String ALIAS = "littleproxy";
     private static final String PASSWORD = "Be Your Own Lantern";
-    private static final String PROTOCOL = "TLS";
+    private static final String PROTOCOL = "TLSv1.2";
     private final File keyStoreFile;
     private final boolean trustAllServers;
     private final boolean sendCerts;
@@ -126,14 +126,12 @@ public class SelfSignedSslEngineSource implements SslEngineSource {
                     // TrustManager that trusts all servers
                     @Override
                     public void checkClientTrusted(X509Certificate[] arg0,
-                            String arg1)
-                            throws CertificateException {
+                            String arg1) {
                     }
 
                     @Override
                     public void checkServerTrusted(X509Certificate[] arg0,
-                            String arg1)
-                            throws CertificateException {
+                            String arg1) {
                     }
 
                     @Override

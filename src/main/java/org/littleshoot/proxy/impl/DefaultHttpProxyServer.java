@@ -2,35 +2,14 @@ package org.littleshoot.proxy.impl;
 
 import io.netty.bootstrap.ChannelFactory;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.ServerChannel;
+import io.netty.channel.*;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.concurrent.GlobalEventExecutor;
-import org.littleshoot.proxy.ActivityTracker;
-import org.littleshoot.proxy.ChainedProxyManager;
-import org.littleshoot.proxy.DefaultHostResolver;
-import org.littleshoot.proxy.DnsSecServerResolver;
-import org.littleshoot.proxy.HostResolver;
-import org.littleshoot.proxy.HttpFilters;
-import org.littleshoot.proxy.HttpFiltersSource;
-import org.littleshoot.proxy.HttpFiltersSourceAdapter;
-import org.littleshoot.proxy.HttpProxyServer;
-import org.littleshoot.proxy.HttpProxyServerBootstrap;
-import org.littleshoot.proxy.MitmManager;
-import org.littleshoot.proxy.ProxyAuthenticator;
-import org.littleshoot.proxy.SslEngineSource;
-import org.littleshoot.proxy.TransportProtocol;
-import org.littleshoot.proxy.UnknownTransportProtocolException;
+import org.littleshoot.proxy.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,6 +24,8 @@ import java.util.Properties;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static io.netty.channel.udt.nio.NioUdtProvider.BYTE_ACCEPTOR;
 
 /**
  * <p>
@@ -494,8 +475,6 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
                         ch.pipeline(),
                         globalTrafficShapingHandler);
             }
-
-            ;
         };
         switch (transportProtocol) {
             case TCP:
@@ -504,7 +483,7 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
                 break;
             case UDT:
                 LOG.info("Proxy listening with UDT transport");
-                serverBootstrap.channelFactory(NioUdtProvider.BYTE_ACCEPTOR)
+                serverBootstrap.channelFactory(BYTE_ACCEPTOR)
                         .option(ChannelOption.SO_BACKLOG, 10)
                         .option(ChannelOption.SO_REUSEADDR, true);
                 break;
