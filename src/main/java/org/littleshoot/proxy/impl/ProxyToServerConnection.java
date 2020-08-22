@@ -3,16 +3,42 @@ package org.littleshoot.proxy.impl;
 import com.google.common.net.HostAndPort;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.*;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler.Sharable;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
-import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpMessage;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpRequestEncoder;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseDecoder;
+import io.netty.handler.codec.http.HttpResponseEncoder;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpUtil;
+import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
-import org.littleshoot.proxy.*;
+import org.littleshoot.proxy.ActivityTracker;
+import org.littleshoot.proxy.ChainedProxy;
+import org.littleshoot.proxy.ChainedProxyAdapter;
+import org.littleshoot.proxy.ChainedProxyManager;
+import org.littleshoot.proxy.FullFlowContext;
+import org.littleshoot.proxy.HttpFilters;
+import org.littleshoot.proxy.MitmManager;
+import org.littleshoot.proxy.TransportProtocol;
+import org.littleshoot.proxy.UnknownTransportProtocolException;
 
 import javax.net.ssl.SSLProtocolException;
 import javax.net.ssl.SSLSession;
@@ -23,7 +49,12 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.RejectedExecutionException;
 
-import static org.littleshoot.proxy.impl.ConnectionState.*;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_CHUNK;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_CONNECT_OK;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_INITIAL;
+import static org.littleshoot.proxy.impl.ConnectionState.CONNECTING;
+import static org.littleshoot.proxy.impl.ConnectionState.DISCONNECTED;
+import static org.littleshoot.proxy.impl.ConnectionState.HANDSHAKING;
 
 /**
  * <p>
@@ -98,7 +129,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     /**
      * Limits bandwidth when throttling is enabled.
      */
-    private volatile GlobalTrafficShapingHandler trafficHandler;
+    private final GlobalTrafficShapingHandler trafficHandler;
 
     /**
      * Minimum size of the adaptive recv buffer when throttling is enabled.
@@ -300,6 +331,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
                             connectLock.wait(30000);
                         } catch (InterruptedException ie) {
                             LOG.warn("Interrupted while waiting for connect monitor");
+                            Thread.currentThread().interrupt();
                         }
                     }
                 }
@@ -556,7 +588,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     /**
      * Opens the socket connection.
      */
-    private ConnectionFlowStep ConnectChannel = new ConnectionFlowStep(this,
+    private final ConnectionFlowStep ConnectChannel = new ConnectionFlowStep(this,
             CONNECTING) {
         @Override
         boolean shouldExecuteOnEventLoop() {
@@ -600,7 +632,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     /**
      * Writes the HTTP CONNECT to the server and waits for a 200 response.
      */
-    private ConnectionFlowStep HTTPCONNECTWithChainedProxy = new ConnectionFlowStep(
+    private final ConnectionFlowStep HTTPCONNECTWithChainedProxy = new ConnectionFlowStep(
             this, AWAITING_CONNECT_OK) {
         protected Future<?> execute() {
             LOG.debug("Handling CONNECT request through Chained Proxy");
@@ -663,7 +695,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      * respond to the CONNECT request.
      * </p>
      */
-    private ConnectionFlowStep MitmEncryptClientChannel = new ConnectionFlowStep(
+    private final ConnectionFlowStep MitmEncryptClientChannel = new ConnectionFlowStep(
             this, HANDSHAKING) {
         @Override
         boolean shouldExecuteOnEventLoop() {
@@ -702,19 +734,18 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         // sends back a valid certificate for the expected host. we can retry the connection without SNI to allow the proxy
         // to connect to these misconfigured hosts. we should only retry the connection without SNI if the connection
         // failure happened when SNI was enabled, to prevent never-ending connection attempts due to SNI warnings.
-        if (!disableSni && cause instanceof SSLProtocolException) {
-            // unfortunately java does not expose the specific TLS alert number (112), so we have to look for the
-            // unrecognized_name string in the exception's message
-            if (cause.getMessage() != null && cause.getMessage().contains("unrecognized_name")) {
-                LOG.debug("Failed to connect to server due to an unrecognized_name SSL warning. Retrying connection without SNI.");
+        // unfortunately java does not expose the specific TLS alert number (112), so we have to look for the
+        // unrecognized_name string in the exception's message
+        if (!disableSni && cause instanceof SSLProtocolException &&
+                cause.getMessage() != null && cause.getMessage().contains("unrecognized_name")) {
+            LOG.debug("Failed to connect to server due to an unrecognized_name SSL warning. Retrying connection without SNI.");
 
-                // disable SNI, re-setup the connection, and restart the connection flow
-                disableSni = true;
-                resetConnectionForRetry();
-                connectAndWrite(initialRequest);
+            // disable SNI, re-setup the connection, and restart the connection flow
+            disableSni = true;
+            resetConnectionForRetry();
+            connectAndWrite(initialRequest);
 
-                return true;
-            }
+            return true;
         }
 
         // the connection issue wasn't due to an unrecognized_name error, or the connection attempt failed even after
@@ -934,7 +965,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         }
     };
 
-    private ResponseReadMonitor responseReadMonitor = new ResponseReadMonitor() {
+    private final ResponseReadMonitor responseReadMonitor = new ResponseReadMonitor() {
         @Override
         protected void responseRead(HttpResponse httpResponse) {
             FullFlowContext flowContext = new FullFlowContext(clientConnection,
@@ -946,7 +977,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         }
     };
 
-    private BytesWrittenMonitor bytesWrittenMonitor = new BytesWrittenMonitor() {
+    private final BytesWrittenMonitor bytesWrittenMonitor = new BytesWrittenMonitor() {
         @Override
         protected void bytesWritten(int numberOfBytes) {
             FullFlowContext flowContext = new FullFlowContext(clientConnection,
@@ -958,7 +989,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         }
     };
 
-    private RequestWrittenMonitor requestWrittenMonitor = new RequestWrittenMonitor() {
+    private final RequestWrittenMonitor requestWrittenMonitor = new RequestWrittenMonitor() {
         @Override
         protected void requestWriting(HttpRequest httpRequest) {
             FullFlowContext flowContext = new FullFlowContext(clientConnection,

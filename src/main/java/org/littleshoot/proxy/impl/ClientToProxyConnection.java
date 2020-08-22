@@ -4,26 +4,56 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelPipeline;
-import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpRequestDecoder;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseEncoder;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpUtil;
+import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.concurrent.Future;
 import org.apache.commons.lang3.StringUtils;
-import org.littleshoot.proxy.*;
+import org.littleshoot.proxy.ActivityTracker;
+import org.littleshoot.proxy.FlowContext;
+import org.littleshoot.proxy.FullFlowContext;
+import org.littleshoot.proxy.HttpFilters;
+import org.littleshoot.proxy.HttpFiltersAdapter;
+import org.littleshoot.proxy.ProxyAuthenticator;
+import org.littleshoot.proxy.SslEngineSource;
 
 import javax.net.ssl.SSLSession;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
-import static org.littleshoot.proxy.impl.ConnectionState.*;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_CHUNK;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_INITIAL;
+import static org.littleshoot.proxy.impl.ConnectionState.AWAITING_PROXY_AUTHENTICATION;
+import static org.littleshoot.proxy.impl.ConnectionState.DISCONNECT_REQUESTED;
+import static org.littleshoot.proxy.impl.ConnectionState.NEGOTIATING_CONNECT;
 
 /**
  * <p>
@@ -103,7 +133,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      */
     private volatile boolean mitming = false;
 
-    private AtomicBoolean authenticated = new AtomicBoolean();
+    private final AtomicBoolean authenticated = new AtomicBoolean();
 
     private final GlobalTrafficShapingHandler globalTrafficShapingHandler;
 
@@ -972,7 +1002,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                 + "the credentials required.</p>\n" + "</body></html>\n";
         FullHttpResponse response = ProxyUtils.createFullHttpResponse(HttpVersion.HTTP_1_1,
                 HttpResponseStatus.PROXY_AUTHENTICATION_REQUIRED, body);
-        HttpHeaders.setDate(response, new Date());
+        response.headers().set(HttpHeaderNames.DATE, new Date());
         response.headers().set("Proxy-Authenticate",
                 "Basic realm=\"" + (realm == null ? "Restricted Files" : realm) + "\"");
         write(response);
@@ -992,8 +1022,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         if (original instanceof FullHttpRequest) {
             return ((FullHttpRequest) original).copy();
         } else {
-            HttpRequest request = new DefaultHttpRequest(original.getProtocolVersion(),
-                    original.getMethod(), original.getUri());
+            HttpRequest request = new DefaultHttpRequest(original.protocolVersion(),
+                    original.method(), original.uri());
             request.headers().set(original.headers());
             return request;
         }
@@ -1036,7 +1066,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
              */
             LOG.debug("Modifying request for proxy chaining");
             // Strip host from uri
-            String uri = httpRequest.getUri();
+            String uri = httpRequest.uri();
             String adjustedUri = ProxyUtils.stripHost(uri);
             LOG.debug("Stripped host from uri: {}    yielding: {}", uri,
                     adjustedUri);
@@ -1080,7 +1110,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
              * that recipient or gatewayed via a protocol which requires a Date.
              */
             if (!headers.contains(HttpHeaderNames.DATE)) {
-                HttpHeaders.setDate(httpResponse, new Date());
+                httpResponse.headers().set(HttpHeaderNames.DATE, new Date());
             }
         }
     }
@@ -1153,7 +1183,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * @return true if the connection will be kept open, or false if it will be disconnected
      */
     private boolean writeBadGateway(HttpRequest httpRequest) {
-        String body = "Bad Gateway: " + httpRequest.getUri();
+        String body = "Bad Gateway: " + httpRequest.uri();
         FullHttpResponse response = ProxyUtils.createFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_GATEWAY, body);
 
         if (ProxyUtils.isHEAD(httpRequest)) {
@@ -1172,7 +1202,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * @return true if the connection will be kept open, or false if it will be disconnected
      */
     private boolean writeBadRequest(HttpRequest httpRequest) {
-        String body = "Bad Request to URI: " + httpRequest.getUri();
+        String body = "Bad Request to URI: " + httpRequest.uri();
         FullHttpResponse response = ProxyUtils.createFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST, body);
 
         if (ProxyUtils.isHEAD(httpRequest)) {
@@ -1227,16 +1257,16 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
 
         // allow short-circuit messages to close the connection. normally the Connection header would be stripped when modifying
         // the message for proxying, so save the keep-alive status before the modifications are made.
-        boolean isKeepAlive = HttpHeaders.isKeepAlive(httpResponse);
+        boolean isKeepAlive = HttpUtil.isKeepAlive(httpResponse);
 
         // if the response is not a Bad Gateway or Gateway Timeout, modify the headers "as if" the short-circuit response were proxied
-        int statusCode = httpResponse.getStatus().code();
+        int statusCode = httpResponse.status().code();
         if (statusCode != HttpResponseStatus.BAD_GATEWAY.code() && statusCode != HttpResponseStatus.GATEWAY_TIMEOUT.code()) {
             modifyResponseHeadersToReflectProxying(httpResponse);
         }
 
         // restore the keep alive status, if it was overwritten when modifying headers for proxying
-        HttpHeaders.setKeepAlive(httpResponse, isKeepAlive);
+        HttpUtil.setKeepAlive(httpResponse, isKeepAlive);
 
         write(httpResponse);
 
@@ -1244,7 +1274,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             writeEmptyBuffer();
         }
 
-        if (!HttpHeaders.isKeepAlive(httpResponse)) {
+        if (!HttpUtil.isKeepAlive(httpResponse)) {
             disconnect();
             return false;
         }
@@ -1315,7 +1345,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
     };
 
-    private RequestReadMonitor requestReadMonitor = new RequestReadMonitor() {
+    private final RequestReadMonitor requestReadMonitor = new RequestReadMonitor() {
         @Override
         protected void requestRead(HttpRequest httpRequest) {
             FlowContext flowContext = flowContext();
@@ -1326,7 +1356,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
     };
 
-    private BytesWrittenMonitor bytesWrittenMonitor = new BytesWrittenMonitor() {
+    private final BytesWrittenMonitor bytesWrittenMonitor = new BytesWrittenMonitor() {
         @Override
         protected void bytesWritten(int numberOfBytes) {
             FlowContext flowContext = flowContext();
@@ -1337,7 +1367,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
     };
 
-    private ResponseWrittenMonitor responseWrittenMonitor = new ResponseWrittenMonitor() {
+    private final ResponseWrittenMonitor responseWrittenMonitor = new ResponseWrittenMonitor() {
         @Override
         protected void responseWritten(HttpResponse httpResponse) {
             FlowContext flowContext = flowContext();
