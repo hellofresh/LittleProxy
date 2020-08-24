@@ -13,19 +13,20 @@ import org.eclipse.jetty.server.handler.ResourceHandler;
  */
 public class PerformanceServer {
     public void run(int port) throws Exception {
-        Server server = new Server(port);
+        Server server = new Server();
         ServerConnector connector = new ServerConnector(server);
+        connector.setPort(port);
         server.addConnector(connector);
 
         ResourceHandler resource_handler = new ResourceHandler();
         resource_handler.setDirectoriesListed(true);
-        resource_handler.setWelcomeFiles(new String[]{"index.html"});
+        resource_handler.setWelcomeFiles(new String[] { "index.html" });
 
         resource_handler.setResourceBase("./performance/site/");
 
         HandlerList handlers = new HandlerList();
-        handlers.setHandlers(new Handler[]{resource_handler,
-                new DefaultHandler()});
+        handlers.setHandlers(new Handler[] { resource_handler,
+                new DefaultHandler() });
         server.setHandler(handlers);
 
         server.start();

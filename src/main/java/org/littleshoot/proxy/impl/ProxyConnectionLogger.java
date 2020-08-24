@@ -1,11 +1,11 @@
 package org.littleshoot.proxy.impl;
 
-import java.util.Arrays;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.helpers.MessageFormatter;
 import org.slf4j.spi.LocationAwareLogger;
+
+import java.util.Arrays;
 
 /**
  * <p>
@@ -165,7 +165,7 @@ class ProxyConnectionLogger {
      */
     private class LocationAwareLogggerDispatch implements LogDispatch {
 
-        private LocationAwareLogger log;
+        private final LocationAwareLogger log;
 
         public LocationAwareLogggerDispatch(LocationAwareLogger log) {
             this.log = log;
