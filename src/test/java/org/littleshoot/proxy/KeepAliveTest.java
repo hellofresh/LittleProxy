@@ -32,9 +32,9 @@ public class KeepAliveTest {
     private Socket socket;
 
     @Before
-    public void setUp() throws Exception {
+    public void setUp() {
         mockServer = new ClientAndServer(0);
-        mockServerPort = mockServer.getPort();
+        mockServerPort = mockServer.getLocalPort();
         socket = null;
         proxyServer = null;
     }
@@ -187,7 +187,7 @@ public class KeepAliveTest {
      * Tests that the proxy does not close the connection after a 504 Gateway Timeout response.
      */
     @Test
-    public void testGatewayTimeoutDoesNotCloseConnection() throws IOException, InterruptedException {
+    public void testGatewayTimeoutDoesNotCloseConnection() throws IOException {
         mockServer.when(request()
                         .withMethod("GET")
                         .withPath("/success"),
@@ -246,7 +246,7 @@ public class KeepAliveTest {
                     public HttpResponse clientToProxyRequest(HttpObject httpObject) {
                         if (httpObject instanceof HttpRequest) {
                             HttpResponse shortCircuitResponse = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
-                            HttpHeaders.setContentLength(shortCircuitResponse, 0);
+                            HttpUtil.setContentLength(shortCircuitResponse, 0);
                             return shortCircuitResponse;
                         } else {
                             return null;
@@ -304,8 +304,8 @@ public class KeepAliveTest {
                     public HttpResponse clientToProxyRequest(HttpObject httpObject) {
                         if (httpObject instanceof HttpRequest) {
                             HttpResponse shortCircuitResponse = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
-                            HttpHeaders.setContentLength(shortCircuitResponse, 0);
-                            HttpHeaders.setKeepAlive(shortCircuitResponse, false);
+                            HttpUtil.setContentLength(shortCircuitResponse, 0);
+                            HttpUtil.setKeepAlive(shortCircuitResponse, false);
                             return shortCircuitResponse;
                         } else {
                             return null;

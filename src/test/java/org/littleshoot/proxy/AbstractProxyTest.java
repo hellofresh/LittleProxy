@@ -4,17 +4,11 @@ import io.netty.handler.codec.http.HttpRequest;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.params.CoreConnectionPNames;
 import org.apache.http.util.EntityUtils;
 import org.eclipse.jetty.server.Server;
 import org.junit.After;
@@ -130,8 +124,6 @@ public abstract class AbstractProxyTest {
     /**
      * Override this to specify a username to use when authenticating with
      * proxy.
-     *
-     * @return
      */
     protected String getUsername() {
         return null;
@@ -140,8 +132,6 @@ public abstract class AbstractProxyTest {
     /**
      * Override this to specify a password to use when authenticating with
      * proxy.
-     *
-     * @return
      */
     protected String getPassword() {
         return null;
@@ -154,90 +144,62 @@ public abstract class AbstractProxyTest {
     protected ResponseInfo httpPostWithApacheClient(
             HttpHost host, String resourceUrl, boolean isProxied)
             throws Exception {
+        final boolean supportSsl = true;
         String username = getUsername();
         String password = getPassword();
-        final HttpClientBuilder httpClientBuilder = TestUtils.buildHttpClient();
-        if (isProxied) {
-            final HttpHost proxy = new HttpHost("127.0.0.1",
-                    proxyServer.getListenAddress().getPort());
-            httpClientBuilder.setProxy(proxy);
-            if (username != null && password != null) {
-                CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-                credentialsProvider.setCredentials(new AuthScope("127.0.0.1",
-                        proxyServer.getListenAddress().getPort()), new UsernamePasswordCredentials(username,
-                        password));
-                httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
-            }
+        try (CloseableHttpClient httpClient = TestUtils.buildHttpClient(
+                isProxied, supportSsl, proxyServer.getListenAddress().getPort(), username, password)) {
+            final HttpPost request = new HttpPost(resourceUrl);
+            request.setConfig(TestUtils.REQUEST_TIMEOUT_CONFIG);
+
+            final StringEntity entity = new StringEntity("adsf", "UTF-8");
+            entity.setChunked(true);
+            request.setEntity(entity);
+
+            final HttpResponse response = httpClient.execute(host, request);
+            final HttpEntity resEntity = response.getEntity();
+            return new ResponseInfo(response.getStatusLine().getStatusCode(),
+                    EntityUtils.toString(resEntity));
         }
-        CloseableHttpClient httpClient = httpClientBuilder.build();
-
-        final HttpPost request = new HttpPost(resourceUrl);
-        request.getParams().setParameter(
-                CoreConnectionPNames.CONNECTION_TIMEOUT, 5000);
-        // request.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
-        // 15000);
-        final StringEntity entity = new StringEntity("adsf", "UTF-8");
-        entity.setChunked(true);
-        request.setEntity(entity);
-
-        final HttpResponse response = httpClient.execute(host, request);
-        final HttpEntity resEntity = response.getEntity();
-        return new ResponseInfo(response.getStatusLine().getStatusCode(),
-                EntityUtils.toString(resEntity));
-
     }
 
     protected ResponseInfo httpGetWithApacheClient(HttpHost host,
-                                                   String resourceUrl, boolean isProxied, boolean callHeadFirst)
+            String resourceUrl, boolean isProxied, boolean callHeadFirst)
             throws Exception {
+        final boolean supportSsl = true;
         String username = getUsername();
         String password = getPassword();
-        final HttpClientBuilder httpClientBuilder = TestUtils.buildHttpClient();
-        if (isProxied) {
-            HttpHost proxy = new HttpHost("127.0.0.1", proxyServer.getListenAddress().getPort());
-            httpClientBuilder.setProxy(proxy);
-            if (username != null && password != null) {
-                CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-                credentialsProvider.setCredentials(new AuthScope("127.0.0.1",
-                        proxyServer.getListenAddress().getPort()), new UsernamePasswordCredentials(username,
-                        password));
-                httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+        try (CloseableHttpClient httpClient = TestUtils.buildHttpClient(
+                isProxied, supportSsl, proxyServer.getListenAddress().getPort(), username, password)){
+            Integer contentLength = null;
+            if (callHeadFirst) {
+                HttpHead request = new HttpHead(resourceUrl);
+                request.setConfig(TestUtils.REQUEST_TIMEOUT_CONFIG);
+                HttpResponse response = httpClient.execute(host, request);
+                contentLength = new Integer(response.getFirstHeader(
+                        "Content-Length").getValue());
             }
-        }
-        CloseableHttpClient httpClient = httpClientBuilder.build();
 
-        Integer contentLength = null;
-        if (callHeadFirst) {
-            HttpHead request = new HttpHead(resourceUrl);
-            request.getParams().setParameter(
-                    CoreConnectionPNames.CONNECTION_TIMEOUT, 5000);
+            HttpGet request = new HttpGet(resourceUrl);
+            request.setConfig(TestUtils.REQUEST_TIMEOUT_CONFIG);
+
             HttpResponse response = httpClient.execute(host, request);
-            contentLength = Integer.valueOf(response.getFirstHeader(
-                    "Content-Length").getValue());
+            HttpEntity resEntity = response.getEntity();
+
+            if (contentLength != null) {
+                assertEquals(
+                        "Content-Length from GET should match that from HEAD",
+                        contentLength,
+                        new Integer(response.getFirstHeader("Content-Length")
+                                .getValue()));
+            }
+            return new ResponseInfo(response.getStatusLine().getStatusCode(),
+                    EntityUtils.toString(resEntity));
         }
-
-        HttpGet request = new HttpGet(resourceUrl);
-        request.getParams().setParameter(
-                CoreConnectionPNames.CONNECTION_TIMEOUT, 5000);
-        // request.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
-        // 15000);
-
-        HttpResponse response = httpClient.execute(host, request);
-        HttpEntity resEntity = response.getEntity();
-
-        if (contentLength != null) {
-            assertEquals(
-                    "Content-Length from GET should match that from HEAD",
-                    contentLength,
-                    Integer.valueOf(response.getFirstHeader("Content-Length")
-                            .getValue()));
-        }
-        return new ResponseInfo(response.getStatusLine().getStatusCode(),
-                EntityUtils.toString(resEntity));
     }
 
     protected String compareProxiedAndUnproxiedPOST(HttpHost host,
-                                                    String resourceUrl) throws Exception {
+            String resourceUrl) throws Exception {
         ResponseInfo proxiedResponse = httpPostWithApacheClient(host,
                 resourceUrl, true);
         if (expectBadGatewayForEverything()) {
@@ -252,7 +214,7 @@ public abstract class AbstractProxyTest {
     }
 
     protected String compareProxiedAndUnproxiedGET(HttpHost host,
-                                                   String resourceUrl) throws Exception {
+            String resourceUrl) throws Exception {
         ResponseInfo proxiedResponse = httpGetWithApacheClient(host,
                 resourceUrl, true, false);
         if (expectBadGatewayForEverything()) {
@@ -335,7 +297,7 @@ public abstract class AbstractProxyTest {
 
                     @Override
                     public void bytesSentToServer(FullFlowContext flowContext,
-                                                  int numberOfBytes) {
+                            int numberOfBytes) {
                         bytesSentToServer.addAndGet(numberOfBytes);
                     }
 
@@ -362,7 +324,7 @@ public abstract class AbstractProxyTest {
 
                     @Override
                     public void bytesSentToClient(FlowContext flowContext,
-                                                  int numberOfBytes) {
+                            int numberOfBytes) {
                         bytesSentToClient.addAndGet(numberOfBytes);
                     }
 

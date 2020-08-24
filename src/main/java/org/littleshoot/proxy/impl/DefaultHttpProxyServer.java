@@ -1,12 +1,12 @@
 package org.littleshoot.proxy.impl;
 
-import io.netty.bootstrap.ChannelFactory;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import org.littleshoot.proxy.*;
@@ -24,8 +24,6 @@ import java.util.Properties;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static io.netty.channel.udt.nio.NioUdtProvider.BYTE_ACCEPTOR;
 
 /**
  * <p>
@@ -45,6 +43,7 @@ import static io.netty.channel.udt.nio.NioUdtProvider.BYTE_ACCEPTOR;
  *                 .withPort(8090)
  *                 .start();
  * </pre>
+ *
  */
 public class DefaultHttpProxyServer implements HttpProxyServer {
     private static final Logger LOG = LoggerFactory.getLogger(DefaultHttpProxyServer.class);
@@ -56,8 +55,8 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     private static final long TRAFFIC_SHAPING_CHECK_INTERVAL_MS = 250L;
 
     private static final int MAX_INITIAL_LINE_LENGTH_DEFAULT = 8192;
-    private static final int MAX_HEADER_SIZE_DEFAULT = 8192 * 2;
-    private static final int MAX_CHUNK_SIZE_DEFAULT = 8192 * 2;
+    private static final int MAX_HEADER_SIZE_DEFAULT = 8192*2;
+    private static final int MAX_CHUNK_SIZE_DEFAULT = 8192*2;
 
     /**
      * The proxy alias to use in the Via header if no explicit proxy alias is specified and the hostname of the local
@@ -73,14 +72,14 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
 
     private final TransportProtocol transportProtocol;
     /*
-     * The address that the server will attempt to bind to.
-     */
+    * The address that the server will attempt to bind to.
+    */
     private final InetSocketAddress requestedAddress;
     /*
-     * The actual address to which the server is bound. May be different from the requestedAddress in some circumstances,
-     * for example when the requested port is 0.
-     */
-    private volatile InetSocketAddress localAddress;
+    * The actual address to which the server is bound. May be different from the requestedAddress in some circumstances,
+    * for example when the requested port is 0.
+    */
+    private final InetSocketAddress localAddress;
     private volatile InetSocketAddress boundAddress;
     private final SslEngineSource sslEngineSource;
     private final boolean authenticateSslClients;
@@ -97,6 +96,8 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     private final int maxHeaderSize;
     private final int maxChunkSize;
     private final boolean allowRequestsToOriginServer;
+    private final boolean acceptProxyProtocol;
+    private final boolean sendProxyProtocol;
 
     /**
      * The alias or pseudonym for this proxy, used when adding the Via header.
@@ -111,7 +112,7 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     /**
      * Track all ActivityTrackers for tracking proxying activity.
      */
-    private final Collection<ActivityTracker> activityTrackers = new ConcurrentLinkedQueue<ActivityTracker>();
+    private final Collection<ActivityTracker> activityTrackers = new ConcurrentLinkedQueue<>();
 
     /**
      * Keep track of all channels created by this proxy server for later shutdown when the proxy is stopped.
@@ -122,12 +123,10 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
      * JVM shutdown hook to shutdown this proxy server. Declared as a class-level variable to allow removing the shutdown hook when the
      * proxy server is stopped normally.
      */
-    private final Thread jvmShutdownHook = new Thread(() -> abort(), "LittleProxy-JVM-shutdown-hook");
+    private final Thread jvmShutdownHook = new Thread(this::abort, "LittleProxy-JVM-shutdown-hook");
 
     /**
      * Bootstrap a new {@link DefaultHttpProxyServer} starting from scratch.
-     *
-     * @return
      */
     public static HttpProxyServerBootstrap bootstrap() {
         return new DefaultHttpProxyServerBootstrap();
@@ -136,9 +135,6 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     /**
      * Bootstrap a new {@link DefaultHttpProxyServer} using defaults from the
      * given file.
-     *
-     * @param path
-     * @return
      */
     public static HttpProxyServerBootstrap bootstrapFromFile(String path) {
         final File propsFile = new File(path);
@@ -158,59 +154,80 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     /**
      * Creates a new proxy server.
      *
-     * @param serverGroup                 our ServerGroup for shared thread pools and such
-     * @param transportProtocol           The protocol to use for data transport
-     * @param requestedAddress            The address on which this server will listen
-     * @param sslEngineSource             (optional) if specified, this Proxy will encrypt inbound
-     *                                    connections from clients using an {@link SSLEngine} obtained
-     *                                    from this {@link SslEngineSource}.
-     * @param authenticateSslClients      Indicate whether or not to authenticate clients when using SSL
-     * @param proxyAuthenticator          (optional) If specified, requests to the proxy will be
-     *                                    authenticated using HTTP BASIC authentication per the provided
-     *                                    {@link ProxyAuthenticator}
-     * @param chainProxyManager           The proxy to send requests to if chaining proxies. Typically
-     *                                    <code>null</code>.
-     * @param mitmManager                 The {@link MitmManager} to use for man in the middle'ing
-     *                                    CONNECT requests
-     * @param filtersSource               Source for {@link HttpFilters}
-     * @param transparent                 If true, this proxy will run as a transparent proxy. This will
-     *                                    not modify the response, and will only modify the request to
-     *                                    amend the URI if the target is the origin server (to comply
-     *                                    with RFC 7230 section 5.3.1).
-     * @param idleConnectionTimeout       The timeout (in seconds) for auto-closing idle connections.
-     * @param activityTrackers            for tracking activity on this proxy
-     * @param connectTimeout              number of milliseconds to wait to connect to the upstream
-     *                                    server
-     * @param serverResolver              the {@link HostResolver} to use for resolving server addresses
-     * @param readThrottleBytesPerSecond  read throttle bandwidth
-     * @param writeThrottleBytesPerSecond write throttle bandwidth
+     * @param serverGroup
+     *            our ServerGroup for shared thread pools and such
+     * @param transportProtocol
+     *            The protocol to use for data transport
+     * @param requestedAddress
+     *            The address on which this server will listen
+     * @param sslEngineSource
+     *            (optional) if specified, this Proxy will encrypt inbound
+     *            connections from clients using an {@link SSLEngine} obtained
+     *            from this {@link SslEngineSource}.
+     * @param authenticateSslClients
+     *            Indicate whether or not to authenticate clients when using SSL
+     * @param proxyAuthenticator
+     *            (optional) If specified, requests to the proxy will be
+     *            authenticated using HTTP BASIC authentication per the provided
+     *            {@link ProxyAuthenticator}
+     * @param chainProxyManager
+     *            The proxy to send requests to if chaining proxies. Typically
+     *            <code>null</code>.
+     * @param mitmManager
+     *            The {@link MitmManager} to use for man in the middle'ing
+     *            CONNECT requests
+     * @param filtersSource
+     *            Source for {@link HttpFilters}
+     * @param transparent
+     *            If true, this proxy will run as a transparent proxy. This will
+     *            not modify the response, and will only modify the request to
+     *            amend the URI if the target is the origin server (to comply
+     *            with RFC 7230 section 5.3.1).
+     * @param idleConnectionTimeout
+     *            The timeout (in seconds) for auto-closing idle connections.
+     * @param activityTrackers
+     *            for tracking activity on this proxy
+     * @param connectTimeout
+     *            number of milliseconds to wait to connect to the upstream
+     *            server
+     * @param serverResolver
+     *            the {@link HostResolver} to use for resolving server addresses
+     * @param readThrottleBytesPerSecond
+     *            read throttle bandwidth
+     * @param writeThrottleBytesPerSecond
+     *            write throttle bandwidth
      * @param maxInitialLineLength
      * @param maxHeaderSize
      * @param maxChunkSize
-     * @param allowRequestsToOriginServer when true, allow the proxy to handle requests that contain an origin-form URI, as defined in RFC 7230 5.3.1
+     * @param allowRequestsToOriginServer
+     *            when true, allow the proxy to handle requests that contain an origin-form URI, as defined in RFC 7230 5.3.1
+     * @param acceptProxyProtocol when true, the proxy will accept a proxy protocol header from client
+     * @param sendProxyProtocol when true, the proxy will send a proxy protocol header to the server
      */
     private DefaultHttpProxyServer(ServerGroup serverGroup,
-                                   TransportProtocol transportProtocol,
-                                   InetSocketAddress requestedAddress,
-                                   SslEngineSource sslEngineSource,
-                                   boolean authenticateSslClients,
-                                   ProxyAuthenticator proxyAuthenticator,
-                                   ChainedProxyManager chainProxyManager,
-                                   MitmManager mitmManager,
-                                   HttpFiltersSource filtersSource,
-                                   boolean transparent,
-                                   int idleConnectionTimeout,
-                                   Collection<ActivityTracker> activityTrackers,
-                                   int connectTimeout,
-                                   HostResolver serverResolver,
-                                   long readThrottleBytesPerSecond,
-                                   long writeThrottleBytesPerSecond,
-                                   InetSocketAddress localAddress,
-                                   String proxyAlias,
-                                   int maxInitialLineLength,
-                                   int maxHeaderSize,
-                                   int maxChunkSize,
-                                   boolean allowRequestsToOriginServer) {
+            TransportProtocol transportProtocol,
+            InetSocketAddress requestedAddress,
+            SslEngineSource sslEngineSource,
+            boolean authenticateSslClients,
+            ProxyAuthenticator proxyAuthenticator,
+            ChainedProxyManager chainProxyManager,
+            MitmManager mitmManager,
+            HttpFiltersSource filtersSource,
+            boolean transparent,
+            int idleConnectionTimeout,
+            Collection<ActivityTracker> activityTrackers,
+            int connectTimeout,
+            HostResolver serverResolver,
+            long readThrottleBytesPerSecond,
+            long writeThrottleBytesPerSecond,
+            InetSocketAddress localAddress,
+            String proxyAlias,
+            int maxInitialLineLength,
+            int maxHeaderSize,
+            int maxChunkSize,
+            boolean allowRequestsToOriginServer,
+            boolean acceptProxyProtocol,
+            boolean sendProxyProtocol) {
         this.serverGroup = serverGroup;
         this.transportProtocol = transportProtocol;
         this.requestedAddress = requestedAddress;
@@ -249,15 +266,12 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
         this.maxHeaderSize = maxHeaderSize;
         this.maxChunkSize = maxChunkSize;
         this.allowRequestsToOriginServer = allowRequestsToOriginServer;
+        this.acceptProxyProtocol = acceptProxyProtocol;
+        this.sendProxyProtocol = sendProxyProtocol;
     }
 
     /**
      * Creates a new GlobalTrafficShapingHandler for this HttpProxyServer, using this proxy's proxyToServerEventLoop.
-     *
-     * @param transportProtocol
-     * @param readThrottleBytesPerSecond
-     * @param writeThrottleBytesPerSecond
-     * @return
      */
     private GlobalTrafficShapingHandler createGlobalTrafficShapingHandler(TransportProtocol transportProtocol, long readThrottleBytesPerSecond, long writeThrottleBytesPerSecond) {
         EventLoopGroup proxyToServerEventLoop = this.getProxyToServerWorkerFor(transportProtocol);
@@ -326,19 +340,27 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
     }
 
     public int getMaxInitialLineLength() {
-        return maxInitialLineLength;
-    }
+		return maxInitialLineLength;
+	}
 
     public int getMaxHeaderSize() {
-        return maxHeaderSize;
-    }
+		return maxHeaderSize;
+	}
 
     public int getMaxChunkSize() {
-        return maxChunkSize;
+		return maxChunkSize;
+	}
+
+	public boolean isAllowRequestsToOriginServer() {
+        return allowRequestsToOriginServer;
     }
 
-    public boolean isAllowRequestsToOriginServer() {
-        return allowRequestsToOriginServer;
+    public boolean isAcceptProxyProtocol() {
+        return acceptProxyProtocol;
+    }
+
+    public boolean isSendProxyProtocol() {
+        return sendProxyProtocol;
     }
 
     @Override
@@ -347,25 +369,25 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
                 transportProtocol,
                 new InetSocketAddress(requestedAddress.getAddress(),
                         requestedAddress.getPort() == 0 ? 0 : requestedAddress.getPort() + 1),
-                sslEngineSource,
-                authenticateSslClients,
-                proxyAuthenticator,
-                chainProxyManager,
-                mitmManager,
-                filtersSource,
-                transparent,
-                idleConnectionTimeout,
-                activityTrackers,
-                connectTimeout,
-                serverResolver,
-                globalTrafficShapingHandler != null ? globalTrafficShapingHandler.getReadLimit() : 0,
-                globalTrafficShapingHandler != null ? globalTrafficShapingHandler.getWriteLimit() : 0,
-                localAddress,
-                proxyAlias,
-                maxInitialLineLength,
-                maxHeaderSize,
-                maxChunkSize,
-                allowRequestsToOriginServer);
+                    sslEngineSource,
+                    authenticateSslClients,
+                    proxyAuthenticator,
+                    chainProxyManager,
+                    mitmManager,
+                    filtersSource,
+                    transparent,
+                    idleConnectionTimeout,
+                    activityTrackers,
+                    connectTimeout,
+                    serverResolver,
+                    globalTrafficShapingHandler != null ? globalTrafficShapingHandler.getReadLimit() : 0,
+                    globalTrafficShapingHandler != null ? globalTrafficShapingHandler.getWriteLimit() : 0,
+                    localAddress,
+                    proxyAlias,
+                    maxInitialLineLength,
+                    maxHeaderSize,
+                    maxChunkSize,
+                    allowRequestsToOriginServer);
     }
 
     @Override
@@ -410,8 +432,6 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
 
     /**
      * Register a new {@link Channel} with this server, for later closing.
-     *
-     * @param channel
      */
     protected void registerChannel(Channel channel) {
         allChannels.add(channel);
@@ -479,11 +499,11 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
         switch (transportProtocol) {
             case TCP:
                 LOG.info("Proxy listening with TCP transport");
-                serverBootstrap.channelFactory((ChannelFactory<ServerChannel>) () -> new NioServerSocketChannel());
+                serverBootstrap.channelFactory(NioServerSocketChannel::new);
                 break;
             case UDT:
                 LOG.info("Proxy listening with UDT transport");
-                serverBootstrap.channelFactory(BYTE_ACCEPTOR)
+                serverBootstrap.channelFactory(NioUdtProvider.BYTE_ACCEPTOR)
                         .option(ChannelOption.SO_BACKLOG, 10)
                         .option(ChannelOption.SO_REUSEADDR, true);
                 break;
@@ -558,7 +578,7 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
         private HttpFiltersSource filtersSource = new HttpFiltersSourceAdapter();
         private boolean transparent = false;
         private int idleConnectionTimeout = 70;
-        private Collection<ActivityTracker> activityTrackers = new ConcurrentLinkedQueue<ActivityTracker>();
+        private final Collection<ActivityTracker> activityTrackers = new ConcurrentLinkedQueue<>();
         private int connectTimeout = 40000;
         private HostResolver serverResolver = new DefaultHostResolver();
         private long readThrottleBytesPerSecond;
@@ -572,6 +592,8 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
         private int maxHeaderSize = MAX_HEADER_SIZE_DEFAULT;
         private int maxChunkSize = MAX_CHUNK_SIZE_DEFAULT;
         private boolean allowRequestToOriginServer = false;
+        private boolean acceptProxyProtocol = false;
+        private boolean sendProxyProtocol = false;
 
         private DefaultHttpProxyServerBootstrap() {
         }
@@ -590,7 +612,7 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
                 Collection<ActivityTracker> activityTrackers,
                 int connectTimeout, HostResolver serverResolver,
                 long readThrottleBytesPerSecond,
-                long writeThrottleBytesPerSecond,
+                long  writeThrottleBytesPerSecond,
                 InetSocketAddress localAddress,
                 String proxyAlias,
                 int maxInitialLineLength,
@@ -619,9 +641,9 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
             this.localAddress = localAddress;
             this.proxyAlias = proxyAlias;
             this.maxInitialLineLength = maxInitialLineLength;
-            this.maxHeaderSize = maxHeaderSize;
-            this.maxChunkSize = maxChunkSize;
-            this.allowRequestToOriginServer = allowRequestToOriginServer;
+        	this.maxHeaderSize = maxHeaderSize;
+        	this.maxChunkSize = maxChunkSize;
+        	this.allowRequestToOriginServer = allowRequestToOriginServer;
         }
 
         private DefaultHttpProxyServerBootstrap(Properties props) {
@@ -782,7 +804,13 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
             this.serverResolver = serverResolver;
             return this;
         }
-
+	@Override
+	public HttpProxyServerBootstrap withServerGroup(
+		ServerGroup group) {
+	   this.serverGroup = group;
+	   return this;
+	}
+		
         @Override
         public HttpProxyServerBootstrap plusActivityTracker(
                 ActivityTracker activityTracker) {
@@ -798,26 +826,38 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
         }
 
         @Override
-        public HttpProxyServerBootstrap withMaxInitialLineLength(int maxInitialLineLength) {
-            this.maxInitialLineLength = maxInitialLineLength;
-            return this;
+        public HttpProxyServerBootstrap withMaxInitialLineLength(int maxInitialLineLength){
+        	this.maxInitialLineLength = maxInitialLineLength;
+        	return this;
         }
 
         @Override
-        public HttpProxyServerBootstrap withMaxHeaderSize(int maxHeaderSize) {
-            this.maxHeaderSize = maxHeaderSize;
-            return this;
+        public HttpProxyServerBootstrap withMaxHeaderSize(int maxHeaderSize){
+        	this.maxHeaderSize = maxHeaderSize;
+        	return this;
         }
 
         @Override
-        public HttpProxyServerBootstrap withMaxChunkSize(int maxChunkSize) {
-            this.maxChunkSize = maxChunkSize;
-            return this;
+        public HttpProxyServerBootstrap withMaxChunkSize(int maxChunkSize){
+        	this.maxChunkSize = maxChunkSize;
+        	return this;
         }
 
         @Override
         public HttpProxyServerBootstrap withAllowRequestToOriginServer(boolean allowRequestToOriginServer) {
             this.allowRequestToOriginServer = allowRequestToOriginServer;
+            return this;
+        }
+
+        @Override
+        public HttpProxyServerBootstrap withAcceptProxyProtocol(boolean acceptProxyProtocol) {
+            this.acceptProxyProtocol = acceptProxyProtocol;
+            return this;
+        }
+
+        @Override
+        public HttpProxyServerBootstrap withSendProxyProtocol(boolean sendProxyProtocol) {
+            this.sendProxyProtocol = sendProxyProtocol;
             return this;
         }
 
@@ -839,7 +879,8 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
 
             if (this.serverGroup != null) {
                 serverGroup = this.serverGroup;
-            } else {
+            }
+            else {
                 serverGroup = new ServerGroup(name, clientToProxyAcceptorThreads, clientToProxyWorkerThreads, proxyToServerWorkerThreads);
             }
 
@@ -851,7 +892,7 @@ public class DefaultHttpProxyServer implements HttpProxyServer {
                     idleConnectionTimeout, activityTrackers, connectTimeout,
                     serverResolver, readThrottleBytesPerSecond, writeThrottleBytesPerSecond,
                     localAddress, proxyAlias, maxInitialLineLength, maxHeaderSize, maxChunkSize,
-                    allowRequestToOriginServer);
+                    allowRequestToOriginServer, acceptProxyProtocol, sendProxyProtocol);
         }
 
         private InetSocketAddress determineListenAddress() {
